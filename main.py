@@ -1,5 +1,6 @@
-#!/usr/bin/python
+#!/usr/bin/env python
 
+from distutils.spawn import find_executable
 from subprocess import call
 import os
 import sys
@@ -11,6 +12,8 @@ import etcd
 
 env = Environment(loader=PackageLoader('haproxy', 'templates'))
 POLL_TIMEOUT = 5
+HAPROXY_CONFIG = '/etc/haproxy.cfg'
+HAPROXY_PID = '/var/run/haproxy.pid'
 
 
 def get_etcd_addr():
@@ -21,6 +24,9 @@ def get_etcd_addr():
     :returns:
         A 2-tuple with the hostname/IP and the numeric TCP port at which etcd
         can be reached.
+
+    :raises SystemExit:
+        If the `ETCD_HOST` environment variable is not defined or is empty.
 
     """
 
@@ -36,10 +42,31 @@ def get_etcd_addr():
     return host, int(port)
 
 
-def get_services():
+def get_haproxy_path():
+    """
+    Return the absolute path to the `haproxy` executable.
+
+    :raises SystemExit:
+        If haproxy cannot be found on the PATH.
+
+    """
+
+    path = find_executable('haproxy')
+    if not path:
+        print('haproxy was not found on your PATH, and it must be installed '
+              'to use this script')
+        sys.exit(1)
+
+    return path
+
+
+def get_services(client):
     """
     Find all services which have been published to etcd and have exposed a
     port.
+
+    :param etcd.Client client:
+        A handle to an etcd server.
 
     :returns:
         A dictionary of dictionaries keyed on service name. The inner
@@ -49,8 +76,7 @@ def get_services():
 
     """
 
-    host, port = get_etcd_addr()
-    client = etcd.Client(host=host, port=int(port))
+    # TODO: handle severed connection, etc
     backends = client.read('/backends', recursive=True)
     services = {}
 
@@ -82,29 +108,66 @@ def generate_config(services):
     """
 
     template = env.get_template('haproxy.cfg.tmpl')
-    with open("/etc/haproxy.cfg", "w") as f:
+    with open(HAPROXY_CONFIG, "w") as f:
         f.write(template.render(services=services))
 
 
-if __name__ == "__main__":
+def restart_haproxy():
+    """
+    Restart haproxy.
+
+    :returns:
+        ``True`` when haproxy appears to have restarted successfully, ``False``
+        otherwise.
+
+    """
+
+    path = get_haproxy_path()
+    cmd = '{haproxy} -f {cfg} -p {pid} -sf $(cat {pid})'.format(
+        haproxy=path,
+        cfg=HAPROXY_CONFIG,
+        pid=HAPROXY_PID,
+    )
+
+    # TODO: shell=True is yucky... read in PID rather than using the cat
+    return call(cmd, shell=True) == 0
+
+
+def main():
+    """
+    Periodically poll etcd for the list of available services running in docker
+    containers. When a new service becomes available or a service disappears,
+    update the configuration for haproxy and restart it.
+
+    """
+
+    # check for haproxy and etcd config before getting into the real code
+    get_haproxy_path()
+    host, port = get_etcd_addr()
+
+    client = None
     current_services = {}
+
     while True:
-        try:
-            services = get_services()
+        if client is None:
+            # TODO: connection error handling
+            client = etcd.Client(host=host, port=port)
 
-            if not services or services == current_services:
-                time.sleep(POLL_TIMEOUT)
-                continue
-
+        services = get_services(client)
+        if services != current_services:
             print("config changed. reload haproxy")
             generate_config(services)
-            ret = call(["./reload-haproxy.sh"])
-            if ret != 0:
-                print("reloading haproxy returned: ", ret)
-                time.sleep(POLL_TIMEOUT)
-                continue
-            current_services = services
-        except Exception as e:
-            print("Error:", e)
+
+            if restart_haproxy():
+                current_services = services
+            else:
+                print("failed to restart haproxy!")
 
         time.sleep(POLL_TIMEOUT)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass
