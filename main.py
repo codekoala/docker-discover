@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 
+from collections import defaultdict
 from distutils.spawn import find_executable
 from subprocess import call
 import os
@@ -78,19 +79,27 @@ def get_services(client):
 
     # TODO: handle severed connection, etc
     backends = client.read('/backends', recursive=True)
-    services = {}
+    services = defaultdict(lambda: {
+        'port': None,
+        'backends': []
+    })
 
     for i in backends.children:
-        if i.key[1:].count("/") != 2:
+        if i.key[1:].count("/") < 2:
             continue
 
-        ignore, service, container = i.key[1:].split("/")
-        endpoints = services.setdefault(service, dict(port="", backends=[]))
+        ignore, service, container = i.key[1:].rsplit("/", 2)
+        endpoints = services[service]
         if container == "port":
             endpoints["port"] = i.value
             continue
 
         endpoints["backends"].append(dict(name=container, addr=i.value))
+
+    # filter out services with no "port" value in etcd
+    for svc, data in tuple(services.items()):
+        if data['port'] is None:
+            services.pop(svc)
 
     return services
 
