@@ -1,20 +1,10 @@
-FROM ubuntu:14.04
+FROM codekoala/python
+MAINTAINER Josh VanderLinden <codekoala@gmail.com>
 
-RUN apt-get update
-RUN apt-get install -y wget make gcc binutils python-pip python-dev libssl-dev
-
-WORKDIR /root
-
-RUN wget http://www.haproxy.org/download/1.5/src/haproxy-1.5.1.tar.gz
-RUN tar -zxvf haproxy-1.5.1.tar.gz
-
-RUN cd haproxy-1.5.1 && make TARGET=generic && make install
-
-RUN pip install python-etcd Jinja2
+RUN pacman -Sy --needed --noconfirm haproxy python-jinja python-etcd
 RUN touch /var/run/haproxy.pid
 
 ADD . /app
-
 WORKDIR /app
 
 EXPOSE 1936
